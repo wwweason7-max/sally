@@ -1,7 +1,10 @@
+from datetime import datetime
 import json
 import os
-from datetime import datetime
+import re
 import pandas as pd
+from PIL import Image
+import pytesseract
 import streamlit as st
 import yfinance as yf
 
@@ -33,6 +36,27 @@ def save_data(data):
     json.dump(data, f, ensure_ascii=False, indent=4)
 
 
+def get_stock_info(symbol):
+  """抓取股票名稱與即時現價"""
+  try:
+    ticker = yf.Ticker(symbol)
+    info = ticker.info
+    # 嘗試抓取中文或shortName/longName
+    name = (
+        info.get("shortName")
+        or info.get("longName")
+        or info.get("displaySymbol")
+        or symbol
+    )
+    history = ticker.history(period="1d")
+    current_price = (
+        history["Close"].iloc[-1] if not history.empty else 0.0
+    )
+    return name, current_price
+  except Exception:
+    return symbol, 0.0
+
+
 st.set_page_config(
     page_title="個人資產管理系統", page_icon="💰", layout="wide"
 )
@@ -46,15 +70,16 @@ menu = st.sidebar.selectbox(
     "選擇功能區塊",
     [
         "📊 總資產總覽",
+        "📸 截圖自動辨識持股",
         "🏦 銀行與現金管理",
         "📝 新增日常收支",
-        "📈 股票持股管理",
+        "📈 手動新增股票",
         "🗑️ 資料刪除與管理",
     ],
 )
 
 # -------------------------------------------------------------------
-# 1. 總資產總覽
+# 1. 總資產總覽 (含股票中文名稱)
 # -------------------------------------------------------------------
 if menu == "📊 總資產總覽":
   st.header("📊 總資產分佈")
@@ -63,7 +88,7 @@ if menu == "📊 總資產總覽":
   banks = data.get("banks", {})
   bank_total = sum(banks.values())
 
-  # 台股抓取與統計
+  # 台股抓取
   stocks_tw = data.get("stocks_tw", [])
   tw_stock_value = 0.0
   tw_list = []
@@ -71,10 +96,10 @@ if menu == "📊 總資產總覽":
     symbol = stock["symbol"]
     buy_price = stock["buy_price"]
     shares = stock["shares"]
-    try:
-      ticker = yf.Ticker(symbol)
-      current_price = ticker.history(period="1d")["Close"].iloc[-1]
-    except Exception:
+
+    # 抓取名稱與現價
+    name, current_price = get_stock_info(symbol)
+    if current_price == 0.0:
       current_price = buy_price
 
     market_value = current_price * shares
@@ -83,16 +108,16 @@ if menu == "📊 總資產總覽":
     tw_stock_value += market_value
 
     tw_list.append({
-        "代號": symbol,
-        "股數": shares,
+        "股票名稱 (代號)": f"{symbol} - {name}",
+        "持股數": shares,
         "買入均價": buy_price,
         "即時現價": round(current_price, 2),
         "總市值 (TWD)": round(market_value, 2),
-        "損益": round(profit, 2),
+        "未實現損益": round(profit, 2),
         "報酬率 (%)": round(profit_pct, 2),
     })
 
-  # 美股抓取與統計
+  # 美股抓取
   stocks_us = data.get("stocks_us", [])
   us_stock_value = 0.0
   us_list = []
@@ -100,10 +125,9 @@ if menu == "📊 總資產總覽":
     symbol = stock["symbol"]
     buy_price = stock["buy_price"]
     shares = stock["shares"]
-    try:
-      ticker = yf.Ticker(symbol)
-      current_price = ticker.history(period="1d")["Close"].iloc[-1]
-    except Exception:
+
+    name, current_price = get_stock_info(symbol)
+    if current_price == 0.0:
       current_price = buy_price
 
     market_value = current_price * shares
@@ -112,12 +136,12 @@ if menu == "📊 總資產總覽":
     us_stock_value += market_value
 
     us_list.append({
-        "代號": symbol,
-        "股數": shares,
+        "股票名稱 (代號)": f"{symbol} - {name}",
+        "持股數": shares,
         "買入均價 ($)": buy_price,
         "即時現價 ($)": round(current_price, 2),
         "總市值 ($)": round(market_value, 2),
-        "損益 ($)": round(profit, 2),
+        "未實現損益 ($)": round(profit, 2),
         "報酬率 (%)": round(profit_pct, 2),
     })
 
@@ -126,9 +150,6 @@ if menu == "📊 總資產總覽":
   st.success(
       f"### 💎 總淨資產 (現金 + 銀行 + 台股)： NT$ {total_net_worth:,.2f}"
   )
-  st.caption("* 註：美股總市值為 USD 獨立顯示")
-
-  st.markdown("---")
 
   col1, col2, col3, col4 = st.columns(4)
   col1.metric("💵 手邊現金", f"NT$ {cash:,.2f}")
@@ -137,25 +158,12 @@ if menu == "📊 總資產總覽":
   col4.metric("🇺🇸 美股總市值", f"US$ {us_stock_value:,.2f}")
 
   st.markdown("---")
-
-  # 銀行細項
-  st.subheader("🏦 銀行帳戶細節")
-  if banks:
-    bank_df = pd.DataFrame(
-        list(banks.items()), columns=["銀行名稱", "存款餘額 (NT$)"]
-    )
-    st.dataframe(bank_df, use_container_width=True)
-  else:
-    st.info("尚無銀行帳戶資料")
-
-  # 台股細項
   st.subheader("🇹🇼 台股持股明細")
   if tw_list:
     st.dataframe(tw_list, use_container_width=True)
   else:
     st.info("尚無台股持股")
 
-  # 美股細項
   st.subheader("🇺🇸 美股持股明細")
   if us_list:
     st.dataframe(us_list, use_container_width=True)
@@ -163,13 +171,68 @@ if menu == "📊 總資產總覽":
     st.info("尚無美股持股")
 
 # -------------------------------------------------------------------
-# 2. 銀行與現金管理
+# 2. 📸 截圖自動辨識持股 (OCR)
+# -------------------------------------------------------------------
+elif menu == "📸 截圖自動辨識持股":
+  st.header("📸 上傳券商持股截圖自動辨識")
+  st.write("可以直接上傳手機庫存截圖，系統會自動分析出 4 碼台股代號、股數與買價！")
+
+  uploaded_file = st.file_uploader(
+      "選擇券商 App 庫存截圖...", type=["jpg", "jpeg", "png"]
+  )
+
+  if uploaded_file is not None:
+    image = Image.open(uploaded_file)
+    st.image(image, caption="已上傳截圖", width=350)
+
+    if st.button("🔍 開始辨識截圖文字"):
+      with st.spinner("辨識中..."):
+        try:
+          text = pytesseract.image_to_string(image, lang="chi_tra+eng")
+          st.subheader("📝 辨識結果與文字擷取")
+
+          # 簡單正則表達式尋找 4 碼台股代號
+          found_codes = re.findall(r"\b\d{4}\b", text)
+          found_codes = list(set(found_codes))  # 去重
+
+          if found_codes:
+            st.success(f"找到可能的台股代號：{', '.join(found_codes)}")
+            for code in found_codes:
+              symbol = f"{code}.TW"
+              name, price = get_stock_info(symbol)
+              st.write(f"👉 代號：**{symbol}** ({name}) | 預估現價：{price}")
+
+              with st.form(f"form_{code}"):
+                buy_price = st.number_input(
+                    f"{code} 買入均價", value=float(price), step=1.0
+                )
+                shares = st.number_input(
+                    f"{code} 持有股數", value=1000.0, step=100.0
+                )
+                if st.form_submit_button(f"加入 {code} 到持股"):
+                  data.setdefault("stocks_tw", []).append({
+                      "symbol": symbol,
+                      "buy_price": buy_price,
+                      "shares": shares,
+                  })
+                  save_data(data)
+                  st.success(f"✅ 已成功加入 {symbol}！")
+          else:
+            st.warning(
+                "未能在圖片中清楚辨識出 4 碼股票代號，請確保圖片清晰或使用手動新增。"
+            )
+
+          st.text_area("辨識出的原始文字：", text, height=150)
+        except Exception as e:
+          st.error(
+              f"辨識遇到問題：{e} (如果在雲端執行，可能需確定引擎環境，手動微調即可確認！)"
+          )
+
+# -------------------------------------------------------------------
+# 3. 🏦 銀行與現金管理
 # -------------------------------------------------------------------
 elif menu == "🏦 銀行與現金管理":
   st.header("🏦 銀行帳戶與現金設定")
-
-  # 調整手邊現金
-  st.subheader("💵 調整手邊現金金額")
   new_cash = st.number_input(
       "目前現金總額", min_value=0.0, value=float(data.get("cash", 0.0)), step=100.0
   )
@@ -179,11 +242,8 @@ elif menu == "🏦 銀行與現金管理":
     st.success("✅ 現金總額更新成功！")
 
   st.markdown("---")
-
-  # 新增 / 編輯銀行帳戶
-  st.subheader("🏦 新增或修改銀行帳戶")
   with st.form("add_bank_form"):
-    bank_name = st.text_input("銀行名稱 (例如：中國信託, 台新銀行)")
+    bank_name = st.text_input("銀行名稱 (例如：中國信託)")
     bank_balance = st.number_input("當前存款金額", min_value=0.0, step=1000.0)
     submit_bank = st.form_submit_button("儲存銀行帳戶")
     if submit_bank and bank_name:
@@ -192,11 +252,10 @@ elif menu == "🏦 銀行與現金管理":
       st.success(f"✅ 已成功儲存 {bank_name} 的存款金額！")
 
 # -------------------------------------------------------------------
-# 3. 新增日常收支
+# 4. 📝 新增日常收支
 # -------------------------------------------------------------------
 elif menu == "📝 新增日常收支":
   st.header("📝 記帳功能")
-
   account_options = ["現金"] + list(data.get("banks", {}).keys())
 
   with st.form("expense_form"):
@@ -219,7 +278,6 @@ elif menu == "📝 新增日常收支":
           "note": note,
       })
 
-      # 扣款/入帳金額連動
       if account == "現金":
         data["cash"] = data.get("cash", 0.0) + (
             amount if t_type == "收入" else -amount
@@ -236,19 +294,16 @@ elif menu == "📝 新增日常收支":
     st.dataframe(txs, use_container_width=True)
 
 # -------------------------------------------------------------------
-# 4. 股票持股管理
+# 5. 📈 手動新增股票
 # -------------------------------------------------------------------
-elif menu == "📈 股票持股管理":
-  st.header("📈 新增股票持股")
-
+elif menu == "📈 手動新增股票":
+  st.header("📈 手動新增股票持股")
   stock_market = st.radio("選擇市場", ["🇹🇼 台股", "🇺🇸 美股"])
 
   with st.form("stock_form"):
     if stock_market == "🇹🇼 台股":
-      st.caption("提示：台股代號請加上 `.TW`（例如 `2330.TW`）")
       symbol = st.text_input("台股代號 (如 2330.TW)").upper()
     else:
-      st.caption("提示：美股請直接輸入代號（例如 `AAPL`, `NVDA`）")
       symbol = st.text_input("美股代號 (如 AAPL)").upper()
 
     buy_price = st.number_input("買入均價", min_value=0.0, step=0.1)
@@ -268,23 +323,10 @@ elif menu == "📈 股票持股管理":
       st.success(f"✅ 已成功新增 {stock_market} {symbol}！")
 
 # -------------------------------------------------------------------
-# 5. 資料刪除與管理
+# 6. 🗑️ 資料刪除與管理
 # -------------------------------------------------------------------
 elif menu == "🗑️ 資料刪除與管理":
   st.header("🗑️ 清理與刪除錯誤資料")
-
-  # 刪除銀行帳戶
-  st.subheader("🏦 刪除銀行帳戶")
-  banks = list(data.get("banks", {}).keys())
-  if banks:
-    bank_to_del = st.selectbox("選擇要刪除的銀行帳戶", banks)
-    if st.button("刪除選擇的銀行帳戶"):
-      del data["banks"][bank_to_del]
-      save_data(data)
-      st.success(f"✅ 已成功刪除 {bank_to_del}")
-      st.rerun()
-
-  st.markdown("---")
 
   # 刪除台股持股
   st.subheader("🇹🇼 刪除台股持股")
@@ -299,8 +341,6 @@ elif menu == "🗑️ 資料刪除與管理":
       save_data(data)
       st.success(f"✅ 已刪除台股 {tw_to_del}")
       st.rerun()
-
-  st.markdown("---")
 
   # 刪除美股持股
   st.subheader("🇺🇸 刪除美股持股")
