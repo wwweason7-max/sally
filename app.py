@@ -2,7 +2,6 @@ from datetime import datetime
 import json
 import os
 import re
-from datetime import datetime
 import pandas as pd
 from PIL import Image
 import pytesseract
@@ -193,7 +192,6 @@ elif menu == "📸 截圖自動辨識與調整":
           found_codes = re.findall(r"\b\d{4}\b", text)
           found_codes = list(dict.fromkeys(found_codes))
 
-          # 建立預設暫存清單給表格編輯
           editable_data = []
           for code in found_codes:
             symbol = f"{code}.TW"
@@ -204,7 +202,6 @@ elif menu == "📸 截圖自動辨識與調整":
                 "持有股數": 1000.0,
             })
 
-          # 如果沒抓到代號，給一行空白範例讓用戶手動填
           if not editable_data:
             editable_data.append(
                 {"代號": "2330.TW", "買入均價": 600.0, "持有股數": 1000.0}
@@ -215,7 +212,6 @@ elif menu == "📸 截圖自動辨識與調整":
         except Exception as e:
           st.error(f"解析失敗：{e}")
 
-    # 如果已經產生表格，顯示互動式編輯器
     if "ocr_table" in st.session_state:
       st.markdown("### ✏️ 修正與調整持股表格")
       st.caption("提示：點擊表格內的格子即可直接修改數字或股票代號。")
@@ -240,7 +236,7 @@ elif menu == "📸 截圖自動辨識與調整":
 
         save_data(data)
         st.success(f"✅ 成功批量匯入 {added_count} 筆持股資料！")
-        del st.session_state["ocr_table"]  # 清除暫存
+        del st.session_state["ocr_table"]
 
 # -------------------------------------------------------------------
 # 3. 🏦 銀行與現金管理
@@ -307,4 +303,68 @@ elif menu == "📝 新增日常收支":
 
   st.markdown("### 📜 歷史記帳明細")
   txs = data.get("transactions", [])
-  if
+  if txs:
+    st.dataframe(txs, use_container_width=True)
+
+# -------------------------------------------------------------------
+# 5. 📈 手動新增股票
+# -------------------------------------------------------------------
+elif menu == "📈 手動新增股票":
+  st.header("📈 手動新增股票持股")
+  stock_market = st.radio("選擇市場", ["🇹🇼 台股", "🇺🇸 美股"])
+
+  with st.form("stock_form"):
+    if stock_market == "🇹🇼 台股":
+      symbol = st.text_input("台股代號 (如 2330.TW)").upper()
+    else:
+      symbol = st.text_input("美股代號 (如 AAPL)").upper()
+
+    buy_price = st.number_input("買入均價", min_value=0.0, step=0.1)
+    shares = st.number_input("持有股數", min_value=0.0, step=1.0)
+
+    submitted = st.form_submit_button("確認新增股票")
+    if submitted and symbol:
+      if stock_market == "🇹🇼 台股":
+        data.setdefault("stocks_tw", []).append(
+            {"symbol": symbol, "buy_price": buy_price, "shares": shares}
+        )
+      else:
+        data.setdefault("stocks_us", []).append(
+            {"symbol": symbol, "buy_price": buy_price, "shares": shares}
+        )
+      save_data(data)
+      st.success(f"✅ 已成功新增 {stock_market} {symbol}！")
+
+# -------------------------------------------------------------------
+# 6. 🗑️ 資料刪除與管理
+# -------------------------------------------------------------------
+elif menu == "🗑️ 資料刪除與管理":
+  st.header("🗑️ 清理與刪除錯誤資料")
+
+  # 刪除台股持股
+  st.subheader("🇹🇼 刪除台股持股")
+  tw_stocks = data.get("stocks_tw", [])
+  if tw_stocks:
+    tw_symbols = [s["symbol"] for s in tw_stocks]
+    tw_to_del = st.selectbox("選擇要刪除的台股代號", tw_symbols)
+    if st.button("刪除此台股"):
+      data["stocks_tw"] = [
+          s for s in tw_stocks if s["symbol"] != tw_to_del
+      ]
+      save_data(data)
+      st.success(f"✅ 已刪除台股 {tw_to_del}")
+      st.rerun()
+
+  # 刪除美股持股
+  st.subheader("🇺🇸 刪除美股持股")
+  us_stocks = data.get("stocks_us", [])
+  if us_stocks:
+    us_symbols = [s["symbol"] for s in us_stocks]
+    us_to_del = st.selectbox("選擇要刪除的美股代號", us_symbols)
+    if st.button("刪除此美股"):
+      data["stocks_us"] = [
+          s for s in us_stocks if s["symbol"] != us_to_del
+      ]
+      save_data(data)
+      st.success(f"✅ 已刪除美股 {us_to_del}")
+      st.rerun()
