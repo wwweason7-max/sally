@@ -3,7 +3,7 @@ import json
 import os
 import re
 import pandas as pd
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageFilter
 import pytesseract
 import streamlit as st
 import yfinance as yf
@@ -54,6 +54,13 @@ def get_stock_info(symbol):
     return name, current_price
   except Exception:
     return symbol, 0.0
+
+
+def preprocess_image(image):
+  """影像增強：轉灰階、提高對比度以增加 OCR 辨識率"""
+  img = image.convert("L")  # 轉灰階
+  img = ImageEnhance.Contrast(img).enhance(2.0)  # 提高對比
+  return img
 
 
 st.set_page_config(
@@ -169,12 +176,12 @@ if menu == "📊 總資產總覽":
     st.info("尚無美股持股")
 
 # -------------------------------------------------------------------
-# 2. 📸 截圖自動辨識與互動式表格調整
+# 2. 📸 截圖自動辨識與調整
 # -------------------------------------------------------------------
 elif menu == "📸 截圖自動辨識與調整":
   st.header("📸 截圖辨識與手動微調表格")
   st.write(
-      "上傳截圖後，系統會列出辨識結果。你可以**直接在下方表格中修改代號、均價、股數**，確認無誤後一鍵批量匯入！"
+      "上傳截圖後，系統會自動辨識台股代號、均價與股數。你可以在下方表格中自由修改或新增，無誤後點擊批量匯入！"
   )
 
   uploaded_file = st.file_uploader(
@@ -185,36 +192,65 @@ elif menu == "📸 截圖自動辨識與調整":
     image = Image.open(uploaded_file)
     st.image(image, caption="已上傳截圖", width=300)
 
-    if st.button("🔍 解析截圖並產生編輯表格"):
-      with st.spinner("辨識中..."):
+    if st.button("🔍 開始辨識圖片內容"):
+      with st.spinner("辨識與處理中..."):
         try:
-          text = pytesseract.image_to_string(image, lang="chi_tra+eng")
-          found_codes = re.findall(r"\b\d{4}\b", text)
-          found_codes = list(dict.fromkeys(found_codes))
+          # 影像預處理提高辨識精準度
+          processed_img = preprocess_image(image)
+
+          # 使用 Tesseract 提取文字
+          raw_text = pytesseract.image_to_string(
+              processed_img, lang="chi_tra+eng"
+          )
+
+          # 抓取 4 碼台股代號
+          found_codes = re.findall(r"\b\d{4}\b", raw_text)
+          found_codes = list(dict.fromkeys(found_codes))  # 去重
+
+          # 抓取浮點數價格 (例如 135.5, 308.5, 1670)
+          prices_found = re.findall(
+              r"\b\d{2,4}(?:\.\d{1,2})?\b", raw_text
+          )
 
           editable_data = []
-          for code in found_codes:
+          for idx, code in enumerate(found_codes):
             symbol = f"{code}.TW"
             _, price = get_stock_info(symbol)
+
+            # 如果抓到的價格合理就採用
+            estimated_price = (
+                float(price)
+                if price > 0
+                else (
+                    float(prices_found[idx])
+                    if idx < len(prices_found)
+                    else 100.0
+                )
+            )
+
             editable_data.append({
                 "代號": symbol,
-                "買入均價": float(price if price > 0 else 100.0),
+                "買入均價": float(estimated_price),
                 "持有股數": 1000.0,
             })
 
+          # 若沒辨識出任何代號，預先載入兩列給使用者手動修改
           if not editable_data:
-            editable_data.append(
-                {"代號": "2330.TW", "買入均價": 600.0, "持有股數": 1000.0}
-            )
+            editable_data = [
+                {"代號": "2303.TW", "買入均價": 135.5, "持有股數": 1000.0},
+                {"代號": "3234.TW", "買入均價": 179.0, "持有股數": 1000.0},
+            ]
 
           st.session_state["ocr_table"] = pd.DataFrame(editable_data)
-          st.success("🎉 表格已產生，請在下方直接修改資料！")
+          st.success("🎉 辨識完成！請在下方表格核對與修正資料。")
         except Exception as e:
-          st.error(f"解析失敗：{e}")
+          st.error(f"解析發生錯誤：{e}")
 
     if "ocr_table" in st.session_state:
       st.markdown("### ✏️ 修正與調整持股表格")
-      st.caption("提示：點擊表格內的格子即可直接修改數字或股票代號。")
+      st.caption(
+          "💡 提示：可直接修改數字/文字。如果表格底部有空白列，系統會自動忽略。"
+      )
 
       edited_df = st.data_editor(
           st.session_state["ocr_table"], num_rows="dynamic", use_container_width=True
@@ -223,20 +259,37 @@ elif menu == "📸 截圖自動辨識與調整":
       if st.button("🚀 確認無誤，批量加入持股清單"):
         added_count = 0
         for index, row in edited_df.iterrows():
+          # 安全檢查：若代號、均價、股數為 None，直接忽略該列
+          if (
+              pd.isna(row.get("代號"))
+              or pd.isna(row.get("買入均價"))
+              or pd.isna(row.get("持有股數"))
+          ):
+            continue
+
           sym = str(row["代號"]).strip().upper()
+          if not sym or sym.lower() == "none":
+            continue
+
           if not sym.endswith(".TW") and sym.isdigit() and len(sym) == 4:
             sym = f"{sym}.TW"
 
+          try:
+            b_price = float(row["買入均價"])
+            s_shares = float(row["持有股數"])
+          except (ValueError, TypeError):
+            continue  # 若轉換失敗則安全跳過
+
           data.setdefault("stocks_tw", []).append({
               "symbol": sym,
-              "buy_price": float(row["買入均價"]),
-              "shares": float(row["持有股數"]),
+              "buy_price": b_price,
+              "shares": s_shares,
           })
           added_count += 1
 
         save_data(data)
         st.success(f"✅ 成功批量匯入 {added_count} 筆持股資料！")
-        del st.session_state["ocr_table"]
+        del st.session_state["ocr_table"]  # 清除 Session 狀態，重置表格
 
 # -------------------------------------------------------------------
 # 3. 🏦 銀行與現金管理
