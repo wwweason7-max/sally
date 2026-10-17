@@ -1,7 +1,7 @@
-from datetime import datetime
 import json
 import os
 import re
+from datetime import datetime
 import pandas as pd
 from PIL import Image
 import pytesseract
@@ -78,7 +78,7 @@ menu = st.sidebar.selectbox(
 )
 
 # -------------------------------------------------------------------
-# 1. 總資產總覽 (含股票中文名稱)
+# 1. 總資產總覽
 # -------------------------------------------------------------------
 if menu == "📊 總資產總覽":
   st.header("📊 總資產分佈")
@@ -151,4 +151,209 @@ if menu == "📊 總資產總覽":
 
   col1, col2, col3, col4 = st.columns(4)
   col1.metric("💵 手邊現金", f"NT$ {cash:,.2f}")
-  col2.metric("🏦 銀行存款總計", f
+  col2.metric("🏦 銀行存款總計", f"NT$ {bank_total:,.2f}")
+  col3.metric("🇹🇼 台股總市值", f"NT$ {tw_stock_value:,.2f}")
+  col4.metric("🇺🇸 美股總市值", f"US$ {us_stock_value:,.2f}")
+
+  st.markdown("---")
+  st.subheader("🇹🇼 台股持股明細")
+  if tw_list:
+    st.dataframe(tw_list, use_container_width=True)
+  else:
+    st.info("尚無台股持股")
+
+  st.subheader("🇺🇸 美股持股明細")
+  if us_list:
+    st.dataframe(us_list, use_container_width=True)
+  else:
+    st.info("尚無美股持股")
+
+# -------------------------------------------------------------------
+# 2. 📸 截圖自動辨識持股 (OCR)
+# -------------------------------------------------------------------
+elif menu == "📸 截圖自動辨識持股":
+  st.header("📸 上傳券商持股截圖自動辨識")
+  st.write("上傳庫存截圖，系統會自動辨識台股 4 碼代號、買入均價與股數！")
+
+  uploaded_file = st.file_uploader(
+      "選擇券商 App 庫存截圖...", type=["jpg", "jpeg", "png"]
+  )
+
+  if uploaded_file is not None:
+    image = Image.open(uploaded_file)
+    st.image(image, caption="已上傳截圖", width=350)
+
+    if st.button("🔍 開始辨識截圖內容"):
+      with st.spinner("系統辨識中..."):
+        try:
+          text = pytesseract.image_to_string(image, lang="chi_tra+eng")
+          found_codes = re.findall(r"\b\d{4}\b", text)
+          found_codes = list(dict.fromkeys(found_codes))
+
+          if found_codes:
+            st.success(f"🎉 辨識成功！找到股票代號：{', '.join(found_codes)}")
+
+            for code in found_codes:
+              symbol = f"{code}.TW"
+              name, price = get_stock_info(symbol)
+
+              st.markdown(f"### 📌 {symbol} ({name})")
+              with st.form(f"form_ocr_{code}"):
+                col1, col2 = st.columns(2)
+                buy_price = col1.number_input(
+                    "買入均價",
+                    value=float(price if price > 0 else 100.0),
+                    step=0.5,
+                )
+                shares = col2.number_input(
+                    "持有股數", value=1000.0, step=100.0
+                )
+
+                if st.form_submit_button(f"➕ 加入 {code} 到持股"):
+                  data.setdefault("stocks_tw", []).append({
+                      "symbol": symbol,
+                      "buy_price": buy_price,
+                      "shares": shares,
+                  })
+                  save_data(data)
+                  st.success(f"✅ 已成功加入 {symbol} ({name})！")
+                  st.rerun()
+          else:
+            st.warning("⚠️ 未能清楚辨識出 4 碼股票代號，請確定圖片清晰。")
+
+          with st.expander("查看辨識出的原始文字"):
+            st.text(text)
+
+        except Exception as e:
+          st.error(f"辨識引擎未就緒，請確定 packages.txt 已推送至 GitHub：{e}")
+
+# -------------------------------------------------------------------
+# 3. 🏦 銀行與現金管理
+# -------------------------------------------------------------------
+elif menu == "🏦 銀行與現金管理":
+  st.header("🏦 銀行帳戶與現金設定")
+  new_cash = st.number_input(
+      "目前現金總額",
+      min_value=0.0,
+      value=float(data.get("cash", 0.0)),
+      step=100.0,
+  )
+  if st.button("更新現金金額"):
+    data["cash"] = new_cash
+    save_data(data)
+    st.success("✅ 現金總額更新成功！")
+
+  st.markdown("---")
+  with st.form("add_bank_form"):
+    bank_name = st.text_input("銀行名稱 (例如：中國信託)")
+    bank_balance = st.number_input("當前存款金額", min_value=0.0, step=1000.0)
+    submit_bank = st.form_submit_button("儲存銀行帳戶")
+    if submit_bank and bank_name:
+      data.setdefault("banks", {})[bank_name] = bank_balance
+      save_data(data)
+      st.success(f"✅ 已成功儲存 {bank_name} 的存款金額！")
+
+# -------------------------------------------------------------------
+# 4. 📝 新增日常收支
+# -------------------------------------------------------------------
+elif menu == "📝 新增日常收支":
+  st.header("📝 記帳功能")
+  account_options = ["現金"] + list(data.get("banks", {}).keys())
+
+  with st.form("expense_form"):
+    date = st.date_input("日期", datetime.now())
+    t_type = st.selectbox("類型", ["支出", "收入"])
+    account = st.selectbox("資金來源/入帳帳戶", account_options)
+    category = st.text_input("類別 (例如：餐飲、交通、薪水)")
+    amount = st.number_input("金額", min_value=0.0, step=10.0)
+    note = st.text_input("備註 (可留空)")
+
+    submitted = st.form_submit_button("確認新增紀錄")
+    if submitted and amount > 0:
+      date_str = date.strftime("%Y-%m-%d")
+      data.setdefault("transactions", []).append({
+          "date": date_str,
+          "type": t_type,
+          "account": account,
+          "category": category,
+          "amount": amount,
+          "note": note,
+      })
+
+      if account == "現金":
+        data["cash"] = data.get("cash", 0.0) + (
+            amount if t_type == "收入" else -amount
+        )
+      elif account in data.get("banks", {}):
+        data["banks"][account] += amount if t_type == "收入" else -amount
+
+      save_data(data)
+      st.success("✅ 記帳成功並已自動更新對應帳戶餘額！")
+
+  st.markdown("### 📜 歷史記帳明細")
+  txs = data.get("transactions", [])
+  if txs:
+    st.dataframe(txs, use_container_width=True)
+
+# -------------------------------------------------------------------
+# 5. 📈 手動新增股票
+# -------------------------------------------------------------------
+elif menu == "📈 手動新增股票":
+  st.header("📈 手動新增股票持股")
+  stock_market = st.radio("選擇市場", ["🇹🇼 台股", "🇺🇸 美股"])
+
+  with st.form("stock_form"):
+    if stock_market == "🇹🇼 台股":
+      symbol = st.text_input("台股代號 (如 2330.TW)").upper()
+    else:
+      symbol = st.text_input("美股代號 (如 AAPL)").upper()
+
+    buy_price = st.number_input("買入均價", min_value=0.0, step=0.1)
+    shares = st.number_input("持有股數", min_value=0.0, step=1.0)
+
+    submitted = st.form_submit_button("確認新增股票")
+    if submitted and symbol:
+      if stock_market == "🇹🇼 台股":
+        data.setdefault("stocks_tw", []).append(
+            {"symbol": symbol, "buy_price": buy_price, "shares": shares}
+        )
+      else:
+        data.setdefault("stocks_us", []).append(
+            {"symbol": symbol, "buy_price": buy_price, "shares": shares}
+        )
+      save_data(data)
+      st.success(f"✅ 已成功新增 {stock_market} {symbol}！")
+
+# -------------------------------------------------------------------
+# 6. 🗑️ 資料刪除與管理
+# -------------------------------------------------------------------
+elif menu == "🗑️ 資料刪除與管理":
+  st.header("🗑️ 清理與刪除錯誤資料")
+
+  # 刪除台股持股
+  st.subheader("🇹🇼 刪除台股持股")
+  tw_stocks = data.get("stocks_tw", [])
+  if tw_stocks:
+    tw_symbols = [s["symbol"] for s in tw_stocks]
+    tw_to_del = st.selectbox("選擇要刪除的台股代號", tw_symbols)
+    if st.button("刪除此台股"):
+      data["stocks_tw"] = [
+          s for s in tw_stocks if s["symbol"] != tw_to_del
+      ]
+      save_data(data)
+      st.success(f"✅ 已刪除台股 {tw_to_del}")
+      st.rerun()
+
+  # 刪除美股持股
+  st.subheader("🇺🇸 刪除美股持股")
+  us_stocks = data.get("stocks_us", [])
+  if us_stocks:
+    us_symbols = [s["symbol"] for s in us_stocks]
+    us_to_del = st.selectbox("選擇要刪除的美股代號", us_symbols)
+    if st.button("刪除此美股"):
+      data["stocks_us"] = [
+          s for s in us_stocks if s["symbol"] != us_to_del
+      ]
+      save_data(data)
+      st.success(f"✅ 已刪除美股 {us_to_del}")
+      st.rerun()
